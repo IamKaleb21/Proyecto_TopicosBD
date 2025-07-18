@@ -10,6 +10,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.chart import BarChart, PieChart, Reference
+import pycountry
+from babel.dates import format_date
+from babel.core import Locale
+import joblib
+import numpy as np
+import os
 
 # Configuración de la página
 st.set_page_config(
@@ -18,6 +24,9 @@ st.set_page_config(
     layout="wide"
 )
 
+# Configurar localización en español
+locale_es = Locale('es')
+
 # Conexión a MongoDB
 @st.cache_resource
 def init_connection():
@@ -25,6 +34,47 @@ def init_connection():
 
 client = init_connection()
 db = client['CostaDelInkaDB']
+
+# Cargar modelo predictivo
+@st.cache_resource
+def load_prediction_model():
+    """Cargar el modelo predictivo de cancelaciones."""
+    # Obtener el directorio donde está el script actual
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(current_dir, "cancellation_model_pipeline.joblib")
+    
+    if os.path.exists(model_path):
+        try:
+            model = joblib.load(model_path)
+            st.success("✅ Modelo cargado exitosamente!")
+            return model
+        except Exception as e:
+            st.error(f"Error al cargar el modelo: {e}")
+            return None
+    else:
+        st.warning(f"Modelo predictivo no encontrado en: {model_path}")
+        return None
+
+def predict_cancellation(model, data):
+    """Hacer predicción de cancelación con el modelo cargado."""
+    if model is None:
+        return None, None
+    
+    try:
+        # Crear DataFrame con los datos de entrada
+        df_input = pd.DataFrame([data])
+        
+        # Hacer predicción
+        prediction = model.predict(df_input)[0]
+        probability = model.predict_proba(df_input)[0][1]  # Probabilidad de cancelación
+        
+        return prediction, probability
+    except Exception as e:
+        st.error(f"Error en la predicción: {e}")
+        return None, None
+
+# Cargar modelo al iniciar la aplicación
+prediction_model = load_prediction_model()
 
 # Funciones de consulta
 @st.cache_data(ttl=600)
@@ -38,6 +88,53 @@ def get_tipos_habitacion():
     """Obtener lista única de tipos de habitación."""
     tipos = list(db.DetallesReserva.distinct("tipo_habitacion_reservada"))
     return ["Todos"] + [t for t in tipos if t]
+
+@st.cache_data(ttl=600)
+def get_paises():
+    paises1 = list(db.Clientes.distinct("pais_origen_cliente"))
+    paises2 = list(db.DetallesReserva.distinct("pais_origen_reserva"))
+    paises = sorted(set([p for p in paises1 + paises2 if p and p.lower() != 'nan' and p != '']))
+    return paises
+
+@st.cache_data(ttl=600)
+def get_tipos_cliente():
+    tipos1 = list(db.TiposCliente.distinct("nombre_tipo_cliente"))
+    tipos2 = list(db.DetallesReserva.distinct("tipo_cliente_en_reserva"))
+    tipos = sorted(set([t for t in tipos1 + tipos2 if t and t.lower() != 'nan' and t != '']))
+    return tipos
+
+@st.cache_data(ttl=600)
+def get_estados_reserva():
+    """Obtener lista única de estados de reserva."""
+    estados = list(db.Reservas.distinct("estado_reserva"))
+    return [e for e in estados if e and e.lower() != 'nan' and e != '']
+
+@st.cache_data(ttl=600)
+def get_tipos_documento():
+    tipos1 = list(db.Clientes.distinct("tipo_documento_identidad"))
+    tipos2 = list(db.TiposDocumentoPago.distinct("nombre_documento"))
+    tipos = sorted(set([t for t in tipos1 + tipos2 if t and t.lower() != 'nan' and t != '']))
+    return tipos
+
+# Eliminar el diccionario PAIS_ALIAS que ya no se usa
+
+@st.cache_data(ttl=600)
+def get_paises_codigos_nombres():
+    # Obtener todos los países disponibles en pycountry
+    cod2name = {}
+    
+    for country in pycountry.countries:
+        try:
+            # Obtener nombre en español usando babel
+            nombre_es = locale_es.territories.get(country.alpha_2, country.name)
+            cod2name[country.alpha_2] = nombre_es
+        except Exception:
+            # Fallback al nombre en inglés si no hay traducción
+            cod2name[country.alpha_2] = country.name
+    
+    # Lista de tuplas (nombre, código) ordenada alfabéticamente por nombre
+    lista = sorted([(v, k) for k, v in cod2name.items()])
+    return lista
 
 def get_metricas_principales(fecha_inicio, fecha_fin, canal_reserva=None):
     """Obtener métricas principales."""
@@ -606,10 +703,17 @@ with tab5:
         nombre_cliente = st.text_input("Nombre completo", max_chars=100)
         email_cliente = st.text_input("Email", max_chars=100)
         telefono_cliente = st.text_input("Teléfono", max_chars=30)
-        tipo_doc = st.text_input("Tipo de documento", max_chars=30)
+        tipo_doc = st.selectbox("Tipo de documento", options=get_tipos_documento())
         num_doc = st.text_input("Número de documento", max_chars=30)
-        fecha_nac = st.date_input("Fecha de nacimiento", value=None)
-        pais_cliente = st.text_input("País de origen", max_chars=50)
+        fecha_nac = st.date_input(
+            "Fecha de nacimiento", 
+            value=None,
+            min_value=datetime(1900, 1, 1).date(),
+            max_value=datetime.now().date()
+        )
+        paises_lista = get_paises_codigos_nombres()
+        pais_nombre = st.selectbox("País de origen", options=[n for n, c in paises_lista])
+        pais_cliente = dict(paises_lista)[pais_nombre]  # código a guardar
         es_recurrente = st.checkbox("¿Es huésped recurrente?", value=False)
 
         st.subheader("Datos de la Reserva")
@@ -618,19 +722,136 @@ with tab5:
         fecha_salida = fecha_llegada + timedelta(days=noches_estadia)
         canal_reserva = st.selectbox("Canal de reserva", options=get_canales_reserva()[1:])
         adr = st.number_input("ADR (Tarifa Diaria Promedio)", min_value=0.0, value=100.0)
-        estado_reserva = st.text_input("Estado de la reserva", value="Confirmada")
+        estado_reserva = st.selectbox("Estado de la reserva", options=get_estados_reserva())
         fue_cancelada = st.checkbox("¿Fue cancelada?", value=False)
         tiempo_anticipacion = st.number_input("Días de anticipación de la reserva", min_value=0, value=0)
-        fecha_creacion = st.date_input("Fecha de creación de la reserva", value=datetime.now().date())
-        fecha_estado = st.date_input("Fecha de estado de la reserva", value=datetime.now().date())
 
         st.subheader("Detalles de la Reserva")
-        tipo_habitacion = st.text_input("Tipo de habitación reservada", max_chars=30)
-        tipo_habitacion_asignada = st.text_input("Tipo de habitación asignada", max_chars=30)
+        tipos_hab = get_tipos_habitacion()[1:]
+        tipo_habitacion = st.selectbox("Tipo de habitación reservada", options=tipos_hab)
+        tipo_habitacion_asignada = st.selectbox("Tipo de habitación asignada", options=tipos_hab)
         cambios_en_reserva = st.number_input("Cambios en la reserva", min_value=0, value=0)
-        tipo_cliente_en_reserva = st.text_input("Tipo de cliente en reserva", max_chars=30)
+        tipo_cliente_en_reserva = st.selectbox("Tipo de cliente en reserva", options=get_tipos_cliente())
 
-        submitted = st.form_submit_button("Guardar Reserva")
+        # Sección de predicción de cancelación
+        st.subheader("🔮 Predicción de Cancelación")
+        st.info("Usa el modelo predictivo para evaluar la probabilidad de cancelación de esta reserva.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            predict_button = st.form_submit_button("🔮 Predecir Cancelación", type="secondary")
+        with col2:
+            submitted = st.form_submit_button("💾 Guardar Reserva", type="primary")
+
+        # Manejo de predicción de cancelación
+        if predict_button:
+            # Validación básica para predicción
+            if not fecha_llegada or not tipo_habitacion or not canal_reserva:
+                st.error("Por favor, completa al menos: fecha de llegada, tipo de habitación y canal de reserva para hacer la predicción.")
+            else:
+                if prediction_model is not None:
+                    # Preparar datos para predicción (según las características del modelo)
+                    prediction_data = {
+                        'tiempo_anticipacion_reserva_dias': tiempo_anticipacion,
+                        'noches_estadia': noches_estadia,
+                        'adr': adr,
+                        'canal_reserva': canal_reserva,
+                        'pais_origen_reserva': pais_cliente,
+                        'es_huesped_recurrente_al_reservar': es_recurrente,
+                        'cancelaciones_previas_cliente_al_reservar': 0,  # Cliente nuevo
+                        'reservas_previas_no_canceladas_cliente_al_reservar': 0,  # Cliente nuevo
+                        'tipo_habitacion_reservada': tipo_habitacion,
+                        'tipo_habitacion_asignada': tipo_habitacion_asignada,
+                        'cambios_en_reserva': cambios_en_reserva,
+                        'tipo_cliente_en_reserva': tipo_cliente_en_reserva,
+                        'mes_llegada': fecha_llegada.month,
+                        'dia_del_anio_llegada': fecha_llegada.timetuple().tm_yday,
+                        'dia_de_la_semana_llegada': fecha_llegada.weekday(),
+                        'cambio_habitacion': 1 if tipo_habitacion != tipo_habitacion_asignada else 0,
+                        'ratio_cancelacion_previo': 0.0,  # Cliente nuevo
+                        'es_huesped_nuevo': 1 if not es_recurrente else 0
+                    }
+                    
+                    # Hacer predicción
+                    prediction, probability = predict_cancellation(prediction_model, prediction_data)
+                    
+                    if prediction is not None and probability is not None:
+                        # Mostrar resultados de la predicción
+                        st.subheader("📊 Resultado de la Predicción")
+                        
+                        # Crear métricas visuales
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            if prediction == 1:
+                                st.metric("🚨 Predicción", "CANCELACIÓN", delta="Alto riesgo")
+                            else:
+                                st.metric("✅ Predicción", "NO CANCELACIÓN", delta="Bajo riesgo")
+                        
+                        with col2:
+                            probability_percentage = probability * 100
+                            st.metric("📈 Probabilidad", f"{probability_percentage:.1f}%")
+                        
+                        with col3:
+                            if probability_percentage > 70:
+                                risk_level = "🔴 ALTO"
+                            elif probability_percentage > 40:
+                                risk_level = "🟡 MEDIO"
+                            else:
+                                risk_level = "🟢 BAJO"
+                            st.metric("⚠️ Nivel de Riesgo", risk_level)
+                        
+                        # Gráfico de probabilidad
+                        fig = go.Figure(go.Indicator(
+                            mode = "gauge+number+delta",
+                            value = probability_percentage,
+                            domain = {'x': [0, 1], 'y': [0, 1]},
+                            title = {'text': "Probabilidad de Cancelación (%)"},
+                            delta = {'reference': 50},
+                            gauge = {
+                                'axis': {'range': [None, 100]},
+                                'bar': {'color': "darkblue"},
+                                'steps': [
+                                    {'range': [0, 40], 'color': "lightgreen"},
+                                    {'range': [40, 70], 'color': "yellow"},
+                                    {'range': [70, 100], 'color': "red"}
+                                ],
+                                'threshold': {
+                                    'line': {'color': "red", 'width': 4},
+                                    'thickness': 0.75,
+                                    'value': 70
+                                }
+                            }
+                        ))
+                        fig.update_layout(height=400)
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Recomendaciones basadas en la predicción
+                        st.subheader("💡 Recomendaciones")
+                        if probability_percentage > 70:
+                            st.error("""
+                            **🚨 ALTO RIESGO DE CANCELACIÓN**
+                            - Considera contactar al cliente para confirmar la reserva
+                            - Ofrece flexibilidad en las políticas de cancelación
+                            - Implementa recordatorios automáticos
+                            - Evalúa ofrecer incentivos para mantener la reserva
+                            """)
+                        elif probability_percentage > 40:
+                            st.warning("""
+                            **🟡 RIESGO MODERADO DE CANCELACIÓN**
+                            - Envía confirmación de reserva por email
+                            - Mantén comunicación regular con el cliente
+                            - Considera ofrecer servicios adicionales
+                            """)
+                        else:
+                            st.success("""
+                            **✅ BAJO RIESGO DE CANCELACIÓN**
+                            - Reserva con alta probabilidad de confirmación
+                            - Procede con confianza
+                            - Considera ofrecer upgrades o servicios premium
+                            """)
+                else:
+                    st.error("Modelo predictivo no disponible. Ejecuta model_pipeline.py para crear el modelo.")
 
         if submitted:
             # Validación básica
@@ -667,11 +888,33 @@ with tab5:
                 cliente_id = cliente["_id"]
                 st.info(f"Cliente existente reutilizado: {cliente['nombre_completo']}")
 
-            # Crear detalle de reserva
+            # Crear IDs para reserva y detalle
+            reserva_id = ObjectId()
             detalle_id = ObjectId()
+            
+            # Crear reserva primero
+            fecha_actual = datetime.now()
+            reserva_data = {
+                "_id": reserva_id,
+                "cliente_id": cliente_id,
+                "detalle_reserva_id": detalle_id,
+                "fecha_creacion_reserva": fecha_actual,
+                "fue_cancelada": fue_cancelada,
+                "tiempo_anticipacion_reserva_dias": tiempo_anticipacion,
+                "fecha_llegada": datetime.combine(fecha_llegada, datetime.min.time()),
+                "fecha_salida": datetime.combine(fecha_salida, datetime.min.time()),
+                "noches_estadia": noches_estadia,
+                "estado_reserva": estado_reserva,
+                "fecha_estado_reserva": fecha_actual,
+                "adr": adr,
+                "canal_reserva": canal_reserva
+            }
+            db.Reservas.insert_one(reserva_data)
+            
+            # Crear detalle de reserva con reserva_id válido
             detalle_data = {
                 "_id": detalle_id,
-                "reserva_id": None,  # Se asigna después
+                "reserva_id": reserva_id,  # Ahora tenemos el ID válido
                 "pais_origen_reserva": pais_cliente,
                 "es_huesped_recurrente_al_reservar": es_recurrente,
                 "cancelaciones_previas_cliente_al_reservar": 0,
@@ -682,26 +925,8 @@ with tab5:
                 "tipo_cliente_en_reserva": tipo_cliente_en_reserva
             }
             db.DetallesReserva.insert_one(detalle_data)
-
-            # Crear reserva
-            reserva_id = ObjectId()
-            db.DetallesReserva.update_one({"_id": detalle_id}, {"$set": {"reserva_id": reserva_id}})
-            reserva_data = {
-                "_id": reserva_id,
-                "cliente_id": cliente_id,
-                "detalle_reserva_id": detalle_id,
-                "fecha_creacion_reserva": datetime.combine(fecha_creacion, datetime.min.time()),
-                "fue_cancelada": fue_cancelada,
-                "tiempo_anticipacion_reserva_dias": tiempo_anticipacion,
-                "fecha_llegada": datetime.combine(fecha_llegada, datetime.min.time()),
-                "fecha_salida": datetime.combine(fecha_salida, datetime.min.time()),
-                "noches_estadia": noches_estadia,
-                "estado_reserva": estado_reserva,
-                "fecha_estado_reserva": datetime.combine(fecha_estado, datetime.min.time()),
-                "adr": adr,
-                "canal_reserva": canal_reserva
-            }
-            db.Reservas.insert_one(reserva_data)
+            
+            # Actualizar historial del cliente
             db.Clientes.update_one({"_id": cliente_id}, {"$push": {"historial_ids_reservas": reserva_id}})
 
             st.success("¡Reserva guardada exitosamente!")
