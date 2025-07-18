@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """
 Script to reduce the number of records in hotel_bookings.csv to 15,000
-and save it as a new file.
+and save it as a new file. Records are selected randomly ensuring at least
+32% of cancellations in the final dataset.
 """
 
 import pandas as pd
 import os
 from pathlib import Path
+import numpy as np
 
 def reduce_hotel_bookings(input_file='hotel_bookings.csv', 
                          output_file='hotel_bookings_reduced.csv', 
-                         target_records=15638):
+                         target_records=15638,
+                         min_cancellation_rate=0.3265):
     """
-    Reduce the number of records in the hotel bookings CSV file.
+    Reduce the number of records in the hotel bookings CSV file by randomly sampling,
+    ensuring a minimum percentage of cancellations.
     
     Args:
         input_file (str): Path to the input CSV file
         output_file (str): Path to the output CSV file
         target_records (int): Number of records to keep
+        min_cancellation_rate (float): Minimum proportion of cancellations desired (0-1)
     """
     
     print(f"Reading {input_file}...")
@@ -42,9 +47,27 @@ def reduce_hotel_bookings(input_file='hotel_bookings.csv',
             print(f"File saved as {output_file}")
             return True
         
-        # Reduce to target number of records
-        print(f"Reducing to {target_records:,} records...")
-        df_reduced = df.head(target_records)
+        # Calculate the number of cancelled and non-cancelled records needed
+        cancelled_records = int(np.ceil(target_records * min_cancellation_rate))
+        non_cancelled_records = target_records - cancelled_records
+        
+        # Split the dataframe into cancelled and non-cancelled
+        df_cancelled = df[df['is_canceled'] == 1]
+        df_non_cancelled = df[df['is_canceled'] == 0]
+        
+        print(f"\nOriginal cancellation rate: {(len(df_cancelled) / len(df)) * 100:.1f}%")
+        
+        # Sample from each group
+        df_cancelled_sample = df_cancelled.sample(n=cancelled_records, random_state=42)
+        df_non_cancelled_sample = df_non_cancelled.sample(n=non_cancelled_records, random_state=42)
+        
+        # Combine the samples and shuffle
+        df_reduced = pd.concat([df_cancelled_sample, df_non_cancelled_sample])
+        df_reduced = df_reduced.sample(frac=1, random_state=42)  # Shuffle the combined dataset
+        
+        # Calculate final cancellation rate
+        final_cancel_rate = (len(df_reduced[df_reduced['is_canceled'] == 1]) / len(df_reduced)) * 100
+        print(f"Final cancellation rate: {final_cancel_rate:.1f}%")
         
         # Save the reduced dataset
         print(f"Saving reduced dataset to {output_file}...")
