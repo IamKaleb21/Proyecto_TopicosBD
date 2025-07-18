@@ -26,41 +26,6 @@ def init_connection():
 client = init_connection()
 db = client['CostaDelInkaDB']
 
-# Verificar conexión y datos
-try:
-    # Verificar conexión
-    client.admin.command('ping')
-    st.success("✅ Conexión a MongoDB exitosa")
-    
-    # Verificar colecciones
-    collections = db.list_collection_names()
-    st.info(f"📊 Colecciones disponibles: {collections}")
-    
-    # Verificar datos en Reservas
-    total_reservas_db = db.Reservas.count_documents({})
-    st.info(f"📋 Total de reservas en BD: {total_reservas_db}")
-    
-    # Verificar fechas disponibles
-    pipeline_fechas = [
-        {"$group": {
-            "_id": None,
-            "fecha_min": {"$min": "$fecha_llegada"},
-            "fecha_max": {"$max": "$fecha_llegada"}
-        }}
-    ]
-    fechas_info = list(db.Reservas.aggregate(pipeline_fechas))
-    if fechas_info:
-        fecha_min = fechas_info[0]["fecha_min"]
-        fecha_max = fechas_info[0]["fecha_max"]
-        st.info(f"📅 Rango de fechas en BD: {fecha_min.strftime('%Y-%m-%d')} a {fecha_max.strftime('%Y-%m-%d')}")
-    
-    # Verificar canales disponibles
-    canales = list(db.Reservas.distinct("canal_reserva"))
-    st.info(f"🌐 Canales de reserva: {canales}")
-    
-except Exception as e:
-    st.error(f"❌ Error de conexión: {e}")
-
 # Funciones de consulta
 @st.cache_data(ttl=600)
 def get_canales_reserva():
@@ -585,20 +550,7 @@ with tab3:
             title="Proporción de Huéspedes Recurrentes"
         )
         st.plotly_chart(fig_recurrentes, use_container_width=True)
-    
-    # Top clientes
-    st.subheader("🏆 Top 10 Clientes con Más Reservas")
-    if top_clientes:
-        df_top_clientes = pd.DataFrame(top_clientes)
-        fig_top_clientes = px.bar(
-            df_top_clientes,
-            x='nombre',
-            y='total_reservas',
-            title="Top 10 Clientes por Número de Reservas",
-            labels={'nombre': 'Cliente', 'total_reservas': 'Total de Reservas'}
-        )
-        fig_top_clientes.update_xaxes(tickangle=45)
-        st.plotly_chart(fig_top_clientes, use_container_width=True)
+
 
 # Pestaña 4: Análisis de Ocupación
 with tab4:
